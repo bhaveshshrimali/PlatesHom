@@ -5,9 +5,10 @@ import pandas as pd
 set_log_level(10)
 parameters["linear_algebra_backend"] = "PETSc"
 parameters["form_compiler"]["cpp_optimize"] = True
-parameters["krylov_solver"]["error_on_nonconvergence"] = False
-parameters["krylov_solver"]["maximum_iterations"] = 3000
-parameters["krylov_solver"]["monitor_convergence"] = True
+parameters["form_compiler"]["optimize"] = True
+# parameters["krylov_solver"]["error_on_nonconvergence"] = False
+# parameters["krylov_solver"]["maximum_iterations"] = 3000
+# parameters["krylov_solver"]["monitor_convergence"] = True
 ffc_options = {
     "optimize": True,
     "eliminate_zeros": True,
@@ -117,13 +118,13 @@ def shear_strain(w, theta):
     return theta - grad(w)
 
 
-def bending_moment(theta, nu, D, Gamm):
+def bm(theta, nu, D, Gamm):
     """Note the eigen curvature in calculation of bending moment"""
     DD = as_tensor([[D, nu * D, 0], [nu * D, D, 0], [0, 0, D * (1 - nu) / 2.0]])
     return voigt2stress(dot(DD, strain2voigt(curv(theta) + Gamm)))
 
 
-def shear_force(w, theta, F):
+def sf(w, theta, F):
     return F * shear_strain(w, theta)
 
 
@@ -512,11 +513,8 @@ Dvals = Evals * thick ** 3 / (1 - nuvals ** 2) / 12.0
 Fvals = Evals / 2.0 / (1 + nuvals) * thick * 5.0 / 6.0
 Gamm_bar = Constant(((0.0, 0.0), (0.0, 0.0)))
 
-dx_shear = dx(
-    metadata={"quadrature_degree": 2 * deg - 2}
-)  # using reduced integration for shear energy
-
-We = FiniteElement("CG", msh.ufl_cell(), deg)
+dxs = dx(metadata={"quadrature_degree": 2 * deg - 2})
+We = FiniteElement("CG", msh.ufl_cell(), deg - 1)
 Te = VectorElement("CG", msh.ufl_cell(), deg)
 
 # Re_s = FiniteElement('R',msh.ufl_cell(),0)
@@ -555,8 +553,8 @@ bc4 = DirichletBC(Ve.sub(1), Constant((0.0, 0.0)), orgn, method="pointwise")
 bcs = [bc1, bc2, bc3, bc4]
 # bcs = []
 a_mu_v = (
-    inner(bending_moment(thta, nuvals, Dvals, Gamm_bar), curv(thta_)) * dx
-    + inner(shear_force(w, thta, Fvals), shear_strain(w_, thta_)) * dx_shear
+    inner(bm(thta, nuvals, Dvals, Gamm_bar), curv(thta_)) * dx
+    + inner(sf(w, thta, Fvals), shear_strain(w_, thta_)) * dxs
 )
 # a_mu_v += inner(lamb_w,w_)*dx + inner(lamb_w_,w)*dx
 # a_mu_v += inner(lamb_thta,thta_)*dx + inner(lamb_thta_,thta)*dx
@@ -564,13 +562,14 @@ a_mu_v = (
 L_w_thta, f_thta = lhs(a_mu_v), rhs(a_mu_v)
 
 # Try improving convergence of the Krylov Solver
-A, b = assemble_system(L_w_thta, f_thta, bcs)
-as_backend_type(A).set_near_nullspace(null_space)
+A, b = assemble_system(L_w_thta, f_thta, bcs, form_compiler_parameters=ffc_options)
+# as_backend_type(A).set_near_nullspace(null_space)
 
-pc = PETScPreconditioner("petsc_amg")
-PETScOptions.set("mg_levels_ksp_type", "chebyshev")
-PETScOptions.set("mg_levels_pc_type", "jacobi")
-solver = PETScKrylovSolver("gmres", pc)
+# pc = PETScPreconditioner("petsc_amg")
+# PETScOptions.set("mg_levels_ksp_type", "chebyshev")
+# PETScOptions.set("mg_levels_pc_type", "jacobi")
+# solver = PETScKrylovSolver("gmres", pc)
+solver = PETScLUSolver(comm, "mumps")
 # PETScOptions.set("mg_levels_esteig_ksp_type", "gmres")
 # PETScOptions.set("mg_levels_ksp_chebyshev_esteig_steps", 100)
 solver.set_operator(A)
@@ -581,27 +580,11 @@ x0 = as_vector([0.5 * Lx, 0.5 * Ly])
 y_scl = x  # - x0
 B_hom = np.zeros((3, 3))
 
-""" 
-The homogenized bending stiffness tensor stored as 
-`B_hom` = [
-            [`B_xx_xx`, `B_yy_xx`, `B_xy_xx`],
-            [`B_xx_yy`, `B_yy_yy`, `B_xy_yy`],
-            [`B_xx_xy`, `B_yy_xy`, `B_xy_xy`]
-]
-"""
-
 for (j, case) in enumerate(["Kxx", "Kyy", "Kxy"]):
 
     print("Solving {} case...".format(case))
     Gamm_bar.assign(Constant(macro_curv(j, scl)))
     solver.solve(w_thta.vector(), b)
-    # print(Gamm_bar.values())
-    # Evals= Expression(Estring,degree=2*deg)
-    # nuvals = Expression(nustring,degree=2*deg)
-    # solve(L_w_thta == f_thta, w_thta, bcs)
-    # solve(L_w_thta == f_thta, w_thta, bcs,solver_parameters={'linear_solver':'bicgstab','preconditioner':'amg'}) #,solver_parameters={'linear_solver':'mumps'})
-    # solve(L_w_thta == f_thta, w_thta, [],solver_parameters={'linear_solver':'bicgstab','preconditioner':'amg'}) #,'preconditioner':'amg'}) # try for parallel
-    # w, thta, lamb_w, lamb_thta = w_thta.split(True)
     w, thta = w_thta.split(True)
 
     # print('kapp_xx = {}'.format( float(assemble((curv(thta)+Gamm_bar)[0,0]*dx))/area ))
@@ -612,11 +595,7 @@ for (j, case) in enumerate(["Kxx", "Kyy", "Kxy"]):
     Kapp_til = M_til.copy()
     for k in range(3):
         M_til[k] = (
-            float(
-                assemble(
-                    stress2Voigt(bending_moment(thta, nuvals, Dvals, Gamm_bar))[k] * dx
-                )
-            )
+            float(assemble(stress2Voigt(bm(thta, nuvals, Dvals, Gamm_bar))[k] * dx))
             / area
         )
         Kapp_til[k] = (
@@ -624,16 +603,16 @@ for (j, case) in enumerate(["Kxx", "Kyy", "Kxy"]):
         )
 
     B_hom[j, :] = M_til.copy() / scl
-    pd.DataFrame(M_til).to_excel(
-        "/home/bshrima2/PlatesTrial/Mtil_{}_dBCf_mod.xlsx".format(case),
-        index=False,
-        header=False,
-    )
-    pd.DataFrame(Kapp_til).to_excel(
-        "/home/bshrima2/PlatesTrial/kapp_{}_dBCf_mod.xlsx".format(case),
-        index=False,
-        header=False,
-    )
+    # pd.DataFrame(M_til).to_excel(
+    #     "/home/bshrima2/PlatesTrial/Mtil_{}_dBCf_mod.xlsx".format(case),
+    #     index=False,
+    #     header=False,
+    # )
+    # pd.DataFrame(Kapp_til).to_excel(
+    #     "/home/bshrima2/PlatesTrial/kapp_{}_dBCf_mod.xlsx".format(case),
+    #     index=False,
+    #     header=False,
+    # )
 
     w_full = w + 0.5 * dot(y_scl, dot(Gamm_bar, y_scl))
     thta_full = thta + dot(Gamm_bar, y_scl)
@@ -669,8 +648,8 @@ Btilde[1, 1] /= M_solid[1, 1, 1, 1]
 Btilde[2, 2] /= M_solid[0, 1, 0, 1]
 # print(np.array_str(B_hom*3./2/float(thick)**3, precision=3))
 # np.savetxt('/home/bshrima2/PlatesTrial/kapp_xy')
-pd.DataFrame(Btilde).to_excel(
-    "/home/bshrima2/PlatesTrial/Btilde_{}_Hex_dBCf_mod.xlsx".format(geom_type),
-    index=False,
-    header=False,
-)
+# pd.DataFrame(Btilde).to_excel(
+#     "/home/bshrima2/PlatesTrial/Btilde_{}_Hex_dBCf_mod.xlsx".format(geom_type),
+#     index=False,
+#     header=False,
+# )
