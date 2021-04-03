@@ -114,18 +114,17 @@ def curv(theta):
     return sym(grad(theta))
 
 
-def shear_strain(w, theta):
+def sstrn(w, theta):
     return theta - grad(w)
 
 
 def bm(theta, nu, D, Gamm):
-    """Note the eigen curvature in calculation of bending moment"""
     DD = as_tensor([[D, nu * D, 0], [nu * D, D, 0], [0, 0, D * (1 - nu) / 2.0]])
     return voigt2stress(dot(DD, strain2voigt(curv(theta) + Gamm)))
 
 
 def sf(w, theta, F):
-    return F * shear_strain(w, theta)
+    return F * sstrn(w, theta)
 
 
 def macro_curv(i, scale):
@@ -554,7 +553,7 @@ bcs = [bc1, bc2, bc3, bc4]
 # bcs = []
 a_mu_v = (
     inner(bm(thta, nuvals, Dvals, Gamm_bar), curv(thta_)) * dx
-    + inner(sf(w, thta, Fvals), shear_strain(w_, thta_)) * dxs
+    + inner(sf(w, thta, Fvals), sstrn(w_, thta_)) * dxs
 )
 # a_mu_v += inner(lamb_w,w_)*dx + inner(lamb_w_,w)*dx
 # a_mu_v += inner(lamb_thta,thta_)*dx + inner(lamb_thta_,thta)*dx
